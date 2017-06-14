@@ -46,7 +46,7 @@ def build_tree_rnn_graph(root):
             child_layers.append(child_layer)
 
     # is there a better way to merge tensors from children ?
-    root.hidden = tf.reduce_mean(child_layers, axis=0)
+    root.hidden = tf.add_n(child_layers) / len(child_layers)
     return
 
 def sentence_graph(sentence):
