@@ -11,8 +11,6 @@ from read_data import make_batch
 import json
 from time import time
 
-np.random.seed(0)
-
 logging.basicConfig(filename='log/lab.log', level=logging.DEBUG, format='%(levelname)s - %(message)s')
 logger = logging.getLogger('lab')
 
@@ -24,6 +22,7 @@ answers = [tf.constant(np.asarray([[1], [0]]), dtype=tf.float32), tf.constant(np
 learning_rate = 0.0001
 batch_size = 5000
 epsilon = tf.constant(value=1e-5)
+number_classes = 2
 
 def sentence_graph(sentence):
     # tree whose node has word, lexical label
@@ -62,29 +61,39 @@ def buid_sentence_expression():
 
     return sentence_tree >> expr_sentence
 
-expr_left_sentence, expr_right_sentence = buid_sentence_expression(), buid_sentence_expression()
+def create_compiler(file_queue):
+    expr_left_sentence, expr_right_sentence = buid_sentence_expression(), buid_sentence_expression()
 
-expr_label = td.InputTransform(lambda label: int(label)) >> td.OneHot(2, dtype=tf.float32)
-one_record = td.InputTransform(lambda record: json.loads(record.decode('utf-8'))) >> td.Record((expr_left_sentence, expr_right_sentence, expr_label), name='instance')
+    expr_label = td.InputTransform(lambda label: int(label)) >> td.OneHot(2, dtype=tf.float32)
+    one_record = td.InputTransform(lambda record: json.loads(record.decode('utf-8'))) >> \
+                 td.Record((expr_left_sentence, expr_right_sentence, expr_label), name='instance')
+                 #td.AllOf(td.slice(start=0, stop=2) >> td.Concat() >> td.FC(2), td.Slice(start=2, stop=3))
 
-file_queue = tf.train.string_input_producer(['data/tree.%d'%(i) for i in range(10)])
-batch = make_batch(file_queue)
-compiler = td.Compiler().create(one_record, input_tensor=batch)
+    batch = make_batch(file_queue)
+    compiler = td.Compiler().create(one_record, input_tensor=batch)
+    return compiler
+
+def build_graph(filequeue):
+    compiler = create_compiler(file_queue)
+    sentence1, sentence2, label_vector = compiler.output_tensors
+
+    w = tf.Variable(tf.random_normal([embedding_size, number_classes]), name='similarity_w')
+    b = tf.Variable(tf.random_normal([1, number_classes]), name='similarity_b')
+    distance = tf.multiply(sentence1, sentence2)
+    logist = tf.sigmoid(tf.matmul(distance, w) + b)
+
+    loss = -1 * tf.reduce_mean(tf.log(logist + epsilon) * label_vector)
+
+    train_step = tf.train.GradientDescentOptimizer(learning_rate).minimize(loss)
+    return logist, loss, train_step, w
 '''
 compiler = td.Compiler().create(one_record)
 '''
-sentence1, sentence2, label_vector = compiler.output_tensors
-
-w = tf.Variable(tf.random_normal([embedding_size, 2]), name='w_to_logits', dtype=tf.float32)
-b = tf.Variable(tf.random_normal([1, 2]), name='b_to_logits', dtype=tf.float32)
-dist = tf.multiply(sentence1, sentence2, name='dot_distance')
-logits = tf.sigmoid(tf.matmul(dist, w) + b)
-
-loss = -1 * tf.reduce_mean(tf.log(logits+epsilon) * label_vector)
-
-train_step = tf.train.GradientDescentOptimizer(learning_rate).minimize(loss)
-
 if __name__ == '__main__':
+    file_queue = tf.train.string_input_producer(['data/tree.%d'%(i) for i in range(10)])
+    #file_queue = tf.train.string_input_producer(['data/tree.test'])
+
+    logist, loss, train_step, w = build_graph(file_queue)
     saver = tf.train.Saver()
 
     with tf.Session() as sess:
@@ -103,8 +112,38 @@ if __name__ == '__main__':
         i = 0
         while True:
             i += 1
-            print(time()-st, sess.run([train_step, loss]))
-            if i%40 == 0:
+            l, t, _ = sess.run([logist, loss, train_step])
+            print(time()-st, list(l))
+            if i % 40 == 0:
                 saver.save(sess, 'models/model_%s' % (i))
                 if i == 400:
                     break
+        '''
+        while st_index < len(train_X):
+            train = [(inst[0], inst[1], label) for inst, label in zip(train_X[st_index:st_index+batch_size], train_Y[st_index:st_index+batch_size])]
+            batch = compiler.build_feed_dict(train)
+            try:
+                sess.run([train_step], feed_dict=batch)
+            except:
+                logger.error(traceback.format_exc())
+                continue
+
+            writer = tf.summary.FileWriter('log', sess.graph)
+
+            p = []
+            for inst, label in zip(test_X, test_Y):
+                predict = tf.argmax(predict_semantics_equality(inst[0], inst[1]), 0, name='predict')
+                print('test', predict)
+                p.append(predict)
+
+            predicts = tf.cast(tf.stack(p), dtype=tf.int8)
+            print(predicts, labels)
+
+            accuracy = tf.reduce_mean(
+                tf.cast(
+                    tf.equal(predicts, labels), dtype=tf.float32))
+
+            sess.run(minimizers)
+            print('accuracy %f'%(sess.run(accuracy)))
+
+        '''
